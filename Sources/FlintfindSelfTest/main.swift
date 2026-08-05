@@ -8,8 +8,8 @@ import Foundation
 // test_ff.py already asserted, and the two gates are meant to disagree loudly if the port drifted.
 //
 // An executable rather than a testTarget because this machine has Command Line Tools and no Xcode,
-// so XCTest does not exist here and `swift test` cannot run at all. reepub ships ReepubSelfTest the
-// same way. `python3 test_ff.py` and this are the same gesture.
+// so XCTest does not exist here and `swift test` cannot run at all. A sibling project ships its
+// gate the same way. `python3 test_ff.py` and this are the same gesture.
 //
 // The CJK is public domain (千字文): a fixture that never touches a multi-byte, space-free term
 // proves nothing about a tool whose whole trick is substring matching — and which words a real
@@ -30,13 +30,13 @@ func check(_ got: Bool, _ why: String) {
 let home = NSHomeDirectory()
 
 // ── mine: written by a person, on purpose ───────────────────────────────────────────────────────
-check(Scope.mine("\(home)/Developer/tile-oss/README.md"), "mine: a repo's own document")
+check(Scope.mine("\(home)/Developer/some-project/README.md"), "mine: a repo's own document")
 // Under ~/Library and NOT excluded — 700+ real documents live there, which is why the system rule is
 // anchored at the ROOT instead of matching /Library/ anywhere.
 check(Scope.mine("\(home)/Library/Mobile Documents/com~apple~CloudDocs/notes/2026-08.md"),
       "mine: iCloud Drive")
 check(Scope.mine("\(home)/Library/CloudStorage/GoogleDrive-x/My Drive/plan.md"), "mine: Google Drive")
-check(!Scope.mine("\(home)/Developer/reef/node_modules/marked/README.md"),
+check(!Scope.mine("\(home)/Developer/some-project/node_modules/marked/README.md"),
       "mine: a vendored dependency is not mine")
 check(!Scope.mine("/Library/Developer/CommandLineTools/usr/share/doc/note.md"),
       "mine: a system path, anchored at the ROOT")
@@ -121,8 +121,8 @@ put(t1, ".agent/notes/manual.pdf", "天地 in a pdf\n")
 put(t1, ".agent/Library/Caches/cached.md", "天地 in an app cache\n")
 
 // 🩸 The second path is "vault-real/linked.md", NOT ".agent/vault/linked.md": results are the
-// RESOLVED path, not the route walked to reach them. ~/.clikae reaches one memory directory through
-// several symlinked names, so which name a document appeared under came down to walk order —
+// RESOLVED path, not the route walked to reach them. One dot-directory reaches a memory
+// directory through several symlinked names, so which name a document appeared under came down to walk order —
 // arbitrary, and demonstrably different between this engine and the Python one on the same query.
 check(under(t1, Search.blindSpot(["天地"], home: t1.path))
         == [".agent/notes/plain.md", "vault-real/linked.md"],

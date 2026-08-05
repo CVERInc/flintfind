@@ -46,7 +46,8 @@ public enum Search {
 
     /// 🔴 SPOTLIGHT DOES NOT INDEX ANYTHING UNDER A DOT-DIRECTORY. Measured 2026-08-05: of the 6967
     /// .md files it knew about on one machine, the number whose path contained a `/.<name>/`
-    /// component was ZERO — while `~/.clikae` alone held 6348 and `~/.claude` another 226.
+    /// component was ZERO — while one agent's memory directory alone held 6348 of them, and a
+    /// second such directory another 226.
     ///
     /// That is a hole in the one thing this tool claims. "Every markdown file on this machine, no
     /// list to maintain" was false by about 6500 documents, and false in the worst place: what lives
@@ -76,7 +77,8 @@ public enum Search {
     /// Search those places by reading them, since nothing has indexed them.
     ///
     /// 🩸 SYMLINKS ARE FOLLOWED, and that is load-bearing. The memory vault reached through
-    /// `~/.clikae` is a symlink, and the first version of this in Python did not follow one — so it
+    /// an agent's memory directory is reached through a symlink, and the first version of this in
+    /// Python did not follow one — so it
     /// walked 12005 files and found the single document it had been written to find ZERO times. A
     /// fix carrying the same blind spot as the bug is the thing to watch for; only running it
     /// against a known answer showed the difference.
@@ -135,7 +137,7 @@ public enum Search {
                     guard fast, !(watchExotic && Bytes.holdsExotic(buf)) else { return nil }
                     return Bytes.containsAll(buf, lows)
                 } ?? slowContains(path, lows)
-                // The RESOLVED path, not the route we arrived by. ~/.clikae reaches one memory
+                // The RESOLVED path, not the route we arrived by. One dot-directory reaches a memory
                 // directory through more than one symlinked name, so which one a document was
                 // reported under came down to walk order — arbitrary, and different between this
                 // and the Python engine on the same query. Resolving makes it canonical; the Set
