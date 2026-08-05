@@ -79,6 +79,66 @@ check(!Scope.local(sparse.path),
 // NOT COVERED, said out loud rather than left looking like coverage: the SF_DATALESS flag READ. The
 // system sets that flag and this cannot; its sibling signal above is what is proven.
 
+// ── blindSpot: the documents Spotlight refuses to look at ───────────────────────────────────────
+// 🩸 THE SYMLINK CASE IS THE ONE THAT MATTERS, and this gate did not have it at all until
+// 2026-08-05. The Python gate asserted both halves; the port arrived carrying neither, and nothing
+// said so, because a missing test looks exactly like a passing one.
+//
+// What that cost, measured: an optimisation swapping `fileExists(atPath:isDirectory:)` for
+// `contentsOfDirectory(at:includingPropertiesForKeys: [.isDirectoryKey])` stopped descending into
+// the symlinked vault. Real answers fell from 291 files to 165 — and this gate printed "all pass"
+// through the whole thing. That is the same blind spot the code below is written to cover, arriving
+// for the third time, which is why it is now asserted rather than described.
+
+func tree(_ tag: String) -> URL {
+    let d = URL(fileURLWithPath: home).appendingPathComponent(".fftest-\(tag)-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+    return d
+}
+
+func put(_ root: URL, _ rel: String, _ body: String) {
+    let f = root.appendingPathComponent(rel)
+    try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(),
+                                             withIntermediateDirectories: true)
+    try? body.write(to: f, atomically: true, encoding: .utf8)
+}
+
+func under(_ root: URL, _ paths: [String]) -> [String] {
+    paths.map { $0.replacingOccurrences(of: root.path + "/", with: "") }.sorted()
+}
+
+let t1 = tree("blind")
+put(t1, ".agent/notes/plain.md", "a note about 天地 here\n")
+put(t1, "vault-real/linked.md", "another note about 天地\n")   // NOT hidden, NOT under a dot-dir
+try? FileManager.default.createSymbolicLink(atPath: t1.appendingPathComponent(".agent/vault").path,
+                                            withDestinationPath: t1.appendingPathComponent("vault-real").path)
+put(t1, ".agent/notes/other.md", "nothing relevant\n")
+put(t1, ".agent/node_modules/pkg/README.md", "天地 in a dependency\n")
+// 🩸 These two exist because a mutation run showed that deleting the extension filter and deleting
+// the mine() call BOTH left the Python gate green: nothing in the fixture was a non-markdown file
+// that matched, and node_modules is pruned before mine() is ever asked. Each reaches exactly one.
+put(t1, ".agent/notes/manual.pdf", "天地 in a pdf\n")
+put(t1, ".agent/Library/Caches/cached.md", "天地 in an app cache\n")
+
+// 🩸 The second path is "vault-real/linked.md", NOT ".agent/vault/linked.md": results are the
+// RESOLVED path, not the route walked to reach them. ~/.clikae reaches one memory directory through
+// several symlinked names, so which name a document appeared under came down to walk order —
+// arbitrary, and demonstrably different between this engine and the Python one on the same query.
+check(under(t1, Search.blindSpot(["天地"], home: t1.path))
+        == [".agent/notes/plain.md", "vault-real/linked.md"],
+      "blindSpot: reads inside a dot-directory AND follows a symlink out of one, reporting the "
+      + "RESOLVED path, skipping non-matches and vendored files")
+try? FileManager.default.removeItem(at: t1)
+
+// A cycle has to terminate rather than walk for ever — the price of following links at all.
+let t2 = tree("loop")
+put(t2, ".loop/inner/note.md", "天地\n")
+try? FileManager.default.createSymbolicLink(atPath: t2.appendingPathComponent(".loop/inner/back").path,
+                                            withDestinationPath: t2.appendingPathComponent(".loop").path)
+check(under(t2, Search.blindSpot(["天地"], home: t2.path)) == [".loop/inner/note.md"],
+      "blindSpot: a symlink cycle terminates, and counts once")
+try? FileManager.default.removeItem(at: t2)
+
 print("")
 if failures.isEmpty {
     print("✅ flintfind selftest: all pass")
