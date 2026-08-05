@@ -139,6 +139,60 @@ check(under(t2, Search.blindSpot(["天地"], home: t2.path)) == [".loop/inner/no
       "blindSpot: a symlink cycle terminates, and counts once")
 try? FileManager.default.removeItem(at: t2)
 
+// 🩸 The one file on which bytes and Unicode genuinely disagree. "TÜRKİYE" holds no ASCII i at all,
+// yet lowering it yields "türki̇ye", which does — so the reference engine finds it when asked for
+// "i" and a byte scan cannot. This is the whole reason the fast path carries an exception, and
+// without this fixture that exception is a paragraph nobody can check.
+let t3 = tree("exotic")
+put(t3, ".notes/turkish.md", "TÜRKİYE\n")
+check(under(t3, Search.blindSpot(["i"], home: t3.path)) == [".notes/turkish.md"],
+      "blindSpot: U+0130 lowers into an ASCII i, and the byte path stands aside for the file holding it")
+try? FileManager.default.removeItem(at: t3)
+
+// ── Bytes: the fast path has to be exact, not nearly ────────────────────────────────────────────
+// The whole justification for matching raw bytes is that ASCII folding gives the SAME answer as
+// lowering both sides, and that rests on one claim about Unicode. Claims about Unicode do not
+// belong in a comment.
+var lowersIntoASCII: [UInt32] = []
+for v in UInt32(0x80)...UInt32(0x10FFFF) {
+    guard let s = Unicode.Scalar(v) else { continue }
+    if String(s).lowercased().unicodeScalars.contains(where: { $0.isASCII && $0.properties.isAlphabetic }) {
+        lowersIntoASCII.append(v)
+    }
+}
+// U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE → "i" + U+0307, and U+212A KELVIN SIGN → "k".
+// Everything else that lowercases to an ASCII letter already WAS that letter. If a future Unicode
+// revision adds a third, this fails here rather than quietly returning a wrong answer for a file
+// nobody thought to check.
+check(lowersIntoASCII == [0x0130, 0x212A],
+      "Bytes: exactly two scalars above ASCII lower into an ASCII letter — the fast path's premise")
+
+check(Bytes.foldable(Bytes.needles(["天地", "parser", "TODO-2026"])),
+      "Bytes: CJK, ASCII and digits need no Unicode lowering")
+check(!Bytes.foldable(Bytes.needles(["café"])),
+      "Bytes: a cased non-ASCII term stands aside — 'É' only meets 'é' through full lowering")
+
+func has(_ hay: String, _ term: String) -> Bool {
+    var h = hay
+    return h.withUTF8 { Bytes.containsAll(UnsafeRawBufferPointer($0), Bytes.needles([term])) }
+}
+check(has("千字文 天地玄黃 宇宙洪荒", "天地"), "Bytes: a CJK substring, no tokenising")
+check(has("The QUICK brown", "quick"), "Bytes: ASCII case folds in the haystack")
+check(!has("天地", "玄黃"), "Bytes: a term that is not there")
+check(has("anything", ""), "Bytes: an empty term is contained by everything, as `\"\" in s` is")
+// 🩸 Bytes, not Characters: a needle can start mid-scalar only if the search is byte-blind, and
+// this is the case that would catch it — the second byte of 天 (U+5929 → E5 A4 A9) can never be
+// mistaken for the start of anything, because continuation bytes are all ≥ 0x80 and ASCII is not.
+check(!has("天", "\u{0}"), "Bytes: a NUL needle does not match a multi-byte character's insides")
+
+check(Search.readableName("note.md") && Search.readableName("NOTE.MD")
+      && Search.readableName("a.markdown") && Search.readableName("b.txt"),
+      "readableName: the three extensions, either case")
+check(Search.readableName(".md"),
+      "readableName: `endswith` counts a file named exactly \".md\" — the Python engine's answer")
+check(!Search.readableName("manual.pdf") && !Search.readableName("mdfile"),
+      "readableName: not a near miss, not a suffix without the dot")
+
 print("")
 if failures.isEmpty {
     print("✅ flintfind selftest: all pass")

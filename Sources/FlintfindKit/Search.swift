@@ -4,6 +4,21 @@ import Foundation
 public enum Search {
 
     static let readable = ["md", "markdown", "txt"]
+    static let readableSuffixes: [[UInt8]] = readable.map { Array(".\($0)".utf8) }
+
+    /// Does this filename end in one of the extensions worth reading, ignoring ASCII case.
+    ///
+    /// On the UTF-8 bytes rather than `(name as NSString).pathExtension.lowercased()`: filenames
+    /// here are largely CJK, and lowercasing one walks it grapheme cluster by grapheme cluster for
+    /// an answer that only ever depends on its last few ASCII bytes.
+    public static func readableName(_ name: String) -> Bool {
+        let b = Array(name.utf8)
+        return readableSuffixes.contains { s in
+            // `>=`, not `>`: the Python engine asks `name.endswith(".md")`, so a file named exactly
+            // ".md" counts. An off-by-one here silently drops a document.
+            b.count >= s.count && !zip(b.suffix(s.count), s).contains { Bytes.fold[Int($0.0)] != $0.1 }
+        }
+    }
 
     /// Ask Spotlight. Terms AND together, substring, so CJK needs no tokenising and a five-character
     /// phrase matches as a phrase — the thing a word-based index gets wrong.
@@ -49,6 +64,15 @@ public enum Search {
             .filter { var d: ObjCBool = false; return FileManager.default.fileExists(atPath: $0, isDirectory: &d) && d.boolValue }
     }
 
+    /// The unhurried answer: decode the file and lower the whole of it, as the Python engine does.
+    /// Reached for a term that needs Unicode lowering ('é' against 'É') and for the two scalars that
+    /// lower into ASCII. Correct, and slow enough that it is worth knowing it is rarely taken.
+    static func slowContains(_ path: String, _ needles: [Bytes.Needle]) -> Bool {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+        let low = text.lowercased()
+        return needles.allSatisfy { Bytes.contains(low, $0) }
+    }
+
     /// Search those places by reading them, since nothing has indexed them.
     ///
     /// 🩸 SYMLINKS ARE FOLLOWED, and that is load-bearing. The memory vault reached through
@@ -61,7 +85,9 @@ public enum Search {
     /// a cycle never terminates at all.
     public static func blindSpot(_ terms: [String], home: String = NSHomeDirectory()) -> [String] {
         guard !terms.isEmpty else { return [] }
-        let lows = terms.map { $0.lowercased() }
+        let lows = Bytes.needles(terms)
+        let fast = Bytes.foldable(lows)
+        let watchExotic = lows.contains(where: \.watchExotic)
         let fm = FileManager.default
         var found = Set<String>()
         var seen = Set<UInt64>()
@@ -71,26 +97,50 @@ public enum Search {
             var st = stat()
             guard stat(dir, &st) == 0 else { continue }
             if !seen.insert(UInt64(st.st_ino)).inserted { continue }
-            guard let names = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            for name in names {
-                if name == "node_modules" { continue }
-                let path = (dir as NSString).appendingPathComponent(name)
-                var sub: ObjCBool = false
-                // fileExists RESOLVES a symlink, which is exactly what is wanted: a link to a
-                // directory has to be descended into, and the inode guard above is what makes that
-                // safe rather than infinite.
-                guard fm.fileExists(atPath: path, isDirectory: &sub) else { continue }
-                if sub.boolValue { stack.append(path); continue }
-                guard readable.contains((name as NSString).pathExtension.lowercased()),
+            // readdir rather than FileManager: profiled, contentsOfDirectory was half the remaining
+            // run — it builds an NSString per entry across eleven thousand of them. readdir also
+            // says what each entry IS, so the per-entry stat is only paid for the links.
+            guard let dp = opendir(dir) else { continue }
+            defer { closedir(dp) }
+            while let e = readdir(dp) {
+                let name = withUnsafePointer(to: &e.pointee.d_name) {
+                    String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self))
+                }
+                if name == "." || name == ".." || name == "node_modules" { continue }
+                let path = dir + "/" + name
+                let isDir: Bool
+                switch Int32(e.pointee.d_type) {
+                case Int32(DT_DIR): isDir = true
+                case Int32(DT_REG): isDir = false
+                default:
+                    // A link, or a filesystem that will not say. stat RESOLVES it, which is exactly
+                    // what is wanted: a link to a directory has to be descended into, and the inode
+                    // guard above is what makes that safe rather than infinite.
+                    var s = stat()
+                    guard stat(path, &s) == 0 else { continue }
+                    isDir = (s.st_mode & S_IFMT) == S_IFDIR
+                }
+                if isDir { stack.append(path); continue }
+                guard readableName(name),
                       Scope.mine(path),
-                      let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-                let low = text.lowercased()
+                      let data = try? Data(contentsOf: URL(fileURLWithPath: path),
+                                           options: .mappedIfSafe) else { continue }
+                // 🔬 Reading BYTES and never building a String is most of what makes this fast.
+                // Profiled on this corpus: decoding each file into a String was 36% of the run and
+                // lowercasing it another 35% — for a question whose entire answer is yes or no. The
+                // byte path is EXACT, not an approximation (see Bytes), and it stands aside for a
+                // term needing full Unicode lowering or for the two measured scalars that lower
+                // into ASCII.
+                let hit = data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Bool? in
+                    guard fast, !(watchExotic && Bytes.holdsExotic(buf)) else { return nil }
+                    return Bytes.containsAll(buf, lows)
+                } ?? slowContains(path, lows)
                 // The RESOLVED path, not the route we arrived by. ~/.clikae reaches one memory
                 // directory through more than one symlinked name, so which one a document was
                 // reported under came down to walk order — arbitrary, and different between this
                 // and the Python engine on the same query. Resolving makes it canonical; the Set
                 // makes a document that IS reachable twice appear once.
-                if lows.allSatisfy({ low.contains($0) }) {
+                if hit {
                     found.insert(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
                 }   // AND, as mdfind does
             }

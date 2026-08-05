@@ -26,11 +26,14 @@ public struct Passages: Sendable {
 public enum Rank {
 
     // A computed property, not a stored one: a Regex is not Sendable, so a static let would be a
-    // shared mutable global under Swift 6 concurrency. Building it per call costs nothing measurable
-    // next to reading the file it is about to describe.
-    static var dateInName: Regex<(Substring, Substring, Substring, Substring)> {
-        /(20\d\d)[-\/.](\d{1,2})[-\/.](\d{1,2})/
-    }
+    // shared mutable global under Swift 6 concurrency.
+    //
+    // 🩸 It used to say building one per call "costs nothing measurable next to reading the file it
+    // is about to describe" — and writtenAt does not read the file. The comment reasoned about the
+    // wrong function, and the profile disagreed: compiling this was one of the two largest costs
+    // left in the run. It is now built ONCE per query and handed down.
+    static var dateInName: DateRegex { /(20\d\d)[-\/.](\d{1,2})[-\/.](\d{1,2})/ }
+    typealias DateRegex = Regex<(Substring, Substring, Substring, Substring)>
     static let context = 1
     public static let readCap = 250
     static let window = 120
@@ -38,7 +41,11 @@ public enum Rank {
     /// Conversation logs are append-only: mtime says "today" for a line typed months ago, and every
     /// line inherits the same wrong date. The filename knows better when it carries one.
     public static func writtenAt(_ path: String, _ name: String) -> Date {
-        if let m = try? dateInName.firstMatch(in: name),
+        writtenAt(path, name, dateInName)
+    }
+
+    static func writtenAt(_ path: String, _ name: String, _ re: DateRegex) -> Date {
+        if let m = try? re.firstMatch(in: name),
            let y = Int(m.1), let mo = Int(m.2), let d = Int(m.3) {
             var c = DateComponents()
             c.year = y; c.month = mo; c.day = d
@@ -50,8 +57,12 @@ public enum Rank {
                 return date
             }
         }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        return (attrs?[.modificationDate] as? Date) ?? Date()
+        // stat, not attributesOfItem: the same mtime without building a dictionary of every other
+        // attribute of the file, asked once per candidate.
+        var st = stat()
+        guard stat(path, &st) == 0 else { return Date() }
+        return Date(timeIntervalSince1970: Double(st.st_mtimespec.tv_sec)
+                    + Double(st.st_mtimespec.tv_nsec) / 1_000_000_000)
     }
 
     /// Rank lines. Reads at most `readCap` files, newest first, and says how many it skipped.
@@ -65,9 +76,23 @@ public enum Rank {
     /// file itself.
     public static func passages(_ paths: [String], terms: [String], limit: Int = 12) -> Passages {
         let now = Date()
-        let ordered = paths.sorted {
-            writtenAt($0, ($0 as NSString).lastPathComponent) > writtenAt($1, ($1 as NSString).lastPathComponent)
-        }
+        // 🩸 writtenAt used to be CALLED FROM THE COMPARATOR, so sorting 291 paths asked it about
+        // 2400 times — each one compiling a regex and hitting the disk — and then the loop below
+        // asked a third time for the age. Once per path, carried through.
+        //
+        // Sorted by (date desc, original position asc) rather than by date alone: Swift's sort is
+        // not GUARANTEED stable and Python's is, so two files sharing a timestamp were free to come
+        // out in different orders in the two engines.
+        //
+        // NOT GATED, and said plainly rather than left looking covered: today's Swift sort happens
+        // to be stable, so removing this tiebreak changes no observable answer and no fixture can
+        // be built that fails on it. The tiebreak is here to make the guarantee the code's own
+        // instead of the standard library's — a check that cannot fail would only be noise.
+        let re = dateInName
+        let when = paths.map { writtenAt($0, ($0 as NSString).lastPathComponent, re) }
+        let ordered = paths.indices
+            .sorted { when[$0] == when[$1] ? $0 < $1 : when[$0] > when[$1] }
+            .map { paths[$0] }
         let skipped = max(0, ordered.count - readCap)
         var hits: [Hit] = []
         var offline: [String] = []
@@ -80,7 +105,10 @@ public enum Rank {
             let name = (base as NSString).deletingPathExtension
             let lowText = text.lowercased()
             let density = lows.reduce(0) { $0 + lowText.components(separatedBy: $1).count - 1 }
-            let age = max(0, now.timeIntervalSince(writtenAt(path, name)) / 86400)
+            // Asked again rather than reusing the sort key: the ordering above uses the filename
+            // WITH its extension and the age uses the stem, which is what the Python engine does.
+            // They disagree only for a name like "notes.2026-08-05" — matching it costs one stat.
+            let age = max(0, now.timeIntervalSince(writtenAt(path, name, re)) / 86400)
             let lines = text.components(separatedBy: "\n")
             let lowName = name.lowercased()
 
