@@ -1,0 +1,19 @@
+name: CI
+
+# Runs the gate documented in the README's Testing section, on every push and PR — the same
+# `swift run flintfind-selftest` a contributor runs locally, so local and CI can never disagree.
+# macos-latest, not ubuntu: Package.swift targets .macOS(.v13) and the tool itself is
+# macOS-only (it shells to `stat`/`readdir` semantics the reference gate was measured against).
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Selftest gate
+        run: swift run flintfind-selftest
