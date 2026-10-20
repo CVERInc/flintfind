@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 
 /// Which documents mention these terms — from the index, and from where the index refuses to look.
@@ -29,17 +30,22 @@ public enum Search {
     public static func spotlight(_ terms: [String]) -> [String] {
         guard !terms.isEmpty else { return [] }
         let pred = terms.map { "kMDItemTextContent == '*\($0)*'c" }.joined(separator: " && ")
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-        p.arguments = [pred]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return [] }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let lines = String(data: data, encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
-        return lines.filter { readable.contains(($0 as NSString).pathExtension.lowercased()) && Scope.mine($0) }
+        // In-process, not `/usr/bin/mdfind`. The answer is the same — five queries against the
+        // mdfind build gave identical files, hits and scores — but a child process inherits the App
+        // Sandbox, and an app that wants this engine cannot hand its search to a tool outside its
+        // own bundle. In the sandbox the index answers only with documents the app may read:
+        // measured 2026-10-20, a whole-machine query from a sandboxed process returned the one
+        // match in its granted folder and not the one beside it. So the same call is the CLI's
+        // whole machine and an app's granted folders, with no scope to pass.
+        guard let q = MDQueryCreate(kCFAllocatorDefault, pred as CFString, nil, nil),
+              MDQueryExecute(q, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return [] }
+        var paths: [String] = []
+        for i in 0..<MDQueryGetResultCount(q) {
+            guard let raw = MDQueryGetResultAtIndex(q, i) else { continue }
+            let item = Unmanaged<MDItem>.fromOpaque(raw).takeUnretainedValue()
+            if let path = MDItemCopyAttribute(item, kMDItemPath) as? String { paths.append(path) }
+        }
+        return paths.filter { readable.contains(($0 as NSString).pathExtension.lowercased()) && Scope.mine($0) }
     }
 
     // MARK: - The blind spot
